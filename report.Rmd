@@ -1,0 +1,406 @@
+---
+title: "TextMining Assignment"
+author: "Marisa Reis"
+date: "13 December 2017"
+number_sections: true
+output: pdf_document
+---
+
+## 0.Abstract
+Text Mining tools were used for classification task. We considered unstructured medical data for two different topics - Human Immunodeficiency Virus (HIV) and human papilloma virus (HPV) taken from the National Center for Biotechnology Information (NCBI) databases using the R package *RISmed*. Text mining processing strategies were applied. We considered the Document Term Matrix struture and performed dimensional using information gain. Results show an accuracy of 81.3%-94.6% when predicting the class of documents.
+
+
+## 1.Introduction
+
+```{r message=FALSE, warning = FALSE}
+library(RISmed)
+library(wordcloud)
+library(tm)
+library(FSelector)
+library(caret)
+```
+For the assignment we consider 
+* RISmed - used to fetch the documents used in this assignment. It is used for extraction of bibliographic content from the National Center for Biotechnology Information (NCBI) databases, including PubMed. The
+name RISmed is a portmanteau of RIS (for Research Information Systems, a common
+tag format for bibliographic data) and PubMed.
+* tm - allows text processing. Gathers a collection of text documents into a structure called Corpus. It has preprocessing text operations and creates a Document-Term matrix structure. 
+* FSelector - feature selection tool.
+* wordcloud - great tool for visualization
+* caret - short for classication and regression training contains functions to streamline
+the model training process for complex regression and classication problems.
+The report document was genereted using the R package **knit**.
+
+```{r setup, include=FALSE}
+str_break = function(x, width = 80L) 
+  {
+  n = nchar(x)
+  if (n <= width) return(x)
+  n1 = seq(1L, n, by = width)
+  n2 = seq(width, n, by = width)
+  if (n %% width != 0) n2 = c(n2, n)
+  substring(x, n1, n2)
+}
+```
+
+The remainder of the report is organized as follows. Section 2 presents the dataset fetching and generation procedures. Section 3 presents the pre-processing strategy and data preparation needed for the classification algorithm input. Section 4 outlines the algorithms and the performance metrics used in the experiment. Section 5 presents the results and discussion. Finally, in Section 6 conclusions are given. Section 7 the package references are also presented.
+
+## 2.Document Dataset
+In this section, we will first describe the process of information retrieval. Next, the definition of the train and test set are also described ending with the creation of an *Corpus* object. 
+
+We considered two different word queries translating two different Sexually Transmitted Diseases (DST). Later on, forming two different document classes. We set $ntr$ as the number of train examples to 500 for each class (query word), and $nte=$150 as testing documents for each class. We consider publications till 2016 (and included) for the training set and publications from 2017 for testing. This way a disjoint train-test set is created.
+
+```{r message=FALSE, warning = FALSE}
+query_c1 <- 'hiv'
+query_c2 <- 'hpv'
+ntr <- 450
+nte <- 150
+query_c1_summary_tr <- EUtilsSummary(query_c1, retmax=ntr, maxdate=2016)
+query_c2_summary_tr <- EUtilsSummary(query_c2, retmax=ntr, maxdate=2016)
+query_c1_summary_te <- EUtilsSummary(query_c1, retmax=nte, mindate=2017,maxdate=2017)
+query_c2_summary_te <- EUtilsSummary(query_c2, retmax=nte, mindate=2017,maxdate=2017)
+c1_docs_tr <- EUtilsGet(query_c1_summary_tr)
+c2_docs_tr <- EUtilsGet(query_c2_summary_tr)
+c1_docs_te <- EUtilsGet(query_c1_summary_te)
+c2_docs_te <- EUtilsGet(query_c2_summary_te)
+
+pubmed_c1_tr <- data.frame('Abstract'= AbstractText(c1_docs_tr))
+pubmed_c2_tr <- data.frame('Abstract'= AbstractText(c2_docs_tr))
+pubmed_c1_te <- data.frame('Abstract'= AbstractText(c1_docs_te))
+pubmed_c2_te <- data.frame('Abstract'= AbstractText(c2_docs_te))
+```
+The EUtilsSummary function supports query search query and indicate how much data is available under the querying criteria. 
+We can inspect the how many results can be extracted by calling *summary* function on the *EUtilsSummary* object.
+```{r}
+summary(query_c1_summary_tr)
+summary(query_c2_summary_tr)
+```
+As we can observe, HIV results are in higher number that the results on the HPV query. Here, we consider samples size of equal number for both classes. Thus, avoiding the creation of an imbalanced dataset for the classification task, which is not the scope of this assignment. 
+
+We create *pubmed_x_x* dataframes with abstract as document information. The documents are stored in a local folder. A function called *create_files* was developed to performe this task.
+```{r}
+create_files <- function(dataframe, folder_name='data'){
+
+  if (!file.exists(folder_name))
+    dir.create(file.path(folder_name))
+
+  for (Abs in 1:dim(dataframe)[1])
+  {
+    doc <- data.frame(dataframe[Abs, ])
+    doc_name <- file.path(folder_name, paste0(folder_name,Abs, ".txt"))
+    write.table(doc, file = doc_name, sep = "", row.names = FALSE,
+                col.names = FALSE, quote = FALSE,
+                append = FALSE)
+  }
+}
+
+create_files(pubmed_c1_tr, folder_name = paste0(query_c1, "_tr"))
+create_files(pubmed_c2_tr, folder_name = paste0(query_c2, "_tr"))
+create_files(pubmed_c1_te, folder_name = paste0(query_c1, "_te"))
+create_files(pubmed_c2_te, folder_name = paste0(query_c2, "_te"))
+```
+
+From the *tm* package we run the VCorpus function, which transforms the documents into a corpus structure, intructing R that we are dealing with text documents.
+
+```{r}
+c1_corpus_tr <- VCorpus(DirSource(paste0(query_c1,"_tr")))
+c2_corpus_tr <- VCorpus(DirSource(paste0(query_c2, "_tr")))
+c1_corpus_te <- VCorpus(DirSource(paste0(query_c1,"_te")))
+c2_corpus_te <- VCorpus(DirSource(paste0(query_c2,"_te")))
+```
+A sample of the created c1_corpus object is given bellow.
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width=80)
+str_break(c1_corpus_tr[[1]][[1]])
+```
+
+## 3.Pre-processing and document analysis
+In this section we detailed the pre-processing strategy adopted in this assignment. A document content analysis is performed by means of wordcloud plots and frequency term inspection.
+
+### 3.1.Pre-processing
+The pre-processing was performed using the *tm_map* function available in *tm* package. We defined a function *preprocessing_corpus* with the document treatment pipeline. More precisely the pipeline includes:
+
+1. remove punctuation;
+2. remove numbers;
+3. remove stop words (from pre-existing English language (available in the *tm* package) and user defined *mystopwords*;
+4. remove symbols;
+5. remove extra whitespace, specially useful after removing words numbers and punctuation;
+6. reduce words to their stems.
+
+```{r}
+toSpace <- content_transformer(function(x, pattern) { return (gsub(pattern, " ", x))})
+
+## pre-processing
+preprocessing_corpus <- function(corpDocs, mystopwords=NULL)
+{
+  corpDocs <- tm_map(corpDocs, removePunctuation)
+  corpDocs <- tm_map(corpDocs, removeNumbers)
+  corpDocs <- tm_map(corpDocs, removeWords, c(mystopwords,stopwords("English")))
+  corpDocs <- tm_map(corpDocs, toSpace, "[^[:alnum:]///' ]")
+  corpDocs <- tm_map(corpDocs, content_transformer(tolower))
+  corpDocs <- tm_map(corpDocs, stemDocument)
+  corpDocs <- tm_map(corpDocs, stripWhitespace)
+  return(corpDocs)
+}
+
+c1_corpus_tr <- preprocessing_corpus(c1_corpus_tr, c(query_c1,query_c2))
+c2_corpus_tr <- preprocessing_corpus(c2_corpus_tr, c(query_c1,query_c2))
+c1_corpus_te <- preprocessing_corpus(c1_corpus_te, c(query_c1,query_c2))
+c2_corpus_te <- preprocessing_corpus(c2_corpus_te, c(query_c1,query_c2))
+```
+The preprocessing needs to be applied for four Corpus objects. In the following the same sample document as before, but with preprocessing applied. 
+```{r}
+str_break(c1_corpus_tr[[1]][[1]])
+```
+
+From the sample inspection we can observe the result of the preprocessing. Note that most of the words are on stem word form. 
+
+After appling the pre-processing the train objects are merged into a single object as follows
+```{r}
+docs_tr <- c(c1_corpus_tr, c2_corpus_tr)
+docs_te <- c(c1_corpus_te, c2_corpus_te)
+length(docs_tr)
+length(docs_te)
+```
+The final train corpus comprises `r length(docs_tr)` documents and test `r length(docs_te)`.
+
+Additionally, we visually inspect the summary of the documents by means of wordcloud. In the following, the most frequent words are highlighted with bigger font size in the plot. 
+
+```{r echo=FALSE, warning = FALSE}
+par(mfrow=c(1,2))
+dtm_c1 = DocumentTermMatrix(c1_corpus_tr)
+dtm_c1_df = as.data.frame(as.matrix(dtm_c1))
+dtm_c1_df = sort(colSums(dtm_c1_df), decreasing = TRUE)
+WordFreq_c1 = data.frame(word = names(dtm_c1_df), freq = dtm_c1_df)
+wordcloud(words = WordFreq_c1$word, freq = WordFreq_c1$freq, min.freq = 1,
+          max.words=200, random.order=FALSE, rot.per=0.35,
+          colors=brewer.pal(8, "Dark2"))
+
+dtm_c2 = DocumentTermMatrix(c2_corpus_tr)
+dtm_c2_df = as.data.frame(as.matrix(dtm_c2))
+dtm_c2_df = sort(colSums(dtm_c2_df), decreasing = TRUE)
+WordFreq_c2 = data.frame(word = names(dtm_c2_df), freq = dtm_c2_df)
+wordcloud(words = WordFreq_c2$word, freq = WordFreq_c2$freq, min.freq = 1,
+          max.words=200, random.order=FALSE, rot.per=0.35,
+          colors=brewer.pal(8, "Dark2"))
+```
+
+As we can observe, the query words are the most frequent, which is expected. But for the classification task, these words must be removed from the text documents. If included in the learning process the classification algorithm will only learn if these words are or not present in the text document. So in the following, the query words *HIV* and *HPV* are removed.
+
+```{r}
+docs_tr <- tm_map(docs_tr, removeWords, stemDocument(c(query_c1,query_c2, 
+                                                       "hivinfect","papillomavirus")))
+docs_te <- tm_map(docs_te, removeWords, stemDocument(c(query_c1,query_c2, 
+                                                       "hivinfect","papillomavirus")))
+```
+
+
+### 3.2.Document-Term Matrix and Sparse Terms Removal
+After the pre-processing for both train and test documents, we consider the Document-Term Matrix (DTM) representation. This representation structures the data into a table shape. Each row contains a sample (here a document), and each column represents an attribute (here a word). This table structure is very parsimonious, since existing classifiers exploit this propositional representation.
+
+The DTM is constructed by calling the *DocumentTermMatrix* function from *tm* package.
+```{r}
+dtm <- DocumentTermMatrix(docs_tr)
+dim(dtm)
+dtm
+```
+
+The resulting *dtm* variable comprises `r dim(dtm)[1]` and `r dim(dtm)[2]` words. But as we can obseve from the printed summary on the DTM, only 99% of the DTM matrix are non-zero. Therefore, we perform word reduction, which in the learning context means performing dimensional reduction.
+We start by inspecting the 10 most frequent words, and having an overall analysis of the documents lexicographic content. 
+
+```{r}
+matrixDocs <- as.matrix(dtm)
+matrixDocs <- sort(colSums(matrixDocs),decreasing=TRUE)
+WordFreq <- data.frame(word = names(matrixDocs),freq=matrixDocs)
+head(WordFreq, 10)
+```
+Next, we reduce the number of terms by allowing for a maximal sparsity at 92%. 
+```{r}
+dtm <- removeSparseTerms(dtm, sparse=0.92)
+```
+With this filter, the final *dtm* matrix has now `r dim(dtm)[2]` words/terms. The final terms are stored.
+```{r}
+lexicon <- names(matrixDocs)
+```
+
+### 3.3.DTM to Data Frame
+As we are are dealing with a supervised learning task, we add the label class for the training documents as follows. 
+```{r}
+df <- as.data.frame(as.matrix(dtm))
+train_x <- df
+train_y <- c(rep(query_c1, ntr), rep(query_c2, ntr))
+train.dc<- cbind(train_x, class=train_y)
+train.dc <- train.dc[sample(2*ntr),]
+```
+Additionally, we shuffle the trainning dataset.
+
+### 3.4. Feature Selection
+Despite a highly number of features were dropped with the sparse terms filter in previous steps, we still have a high number of features. Given that, we consider a supervised feature selection solution, namely the information gain.
+```{r}
+info.terms <- information.gain(class~., train.dc)
+head(info.terms)
+```
+
+The training set updated with *info.terms*, just by keeping those variables for the classification task.
+```{r}
+train.dc <- train.dc[, c(which(info.terms$attr_importance > 0), ncol(train.dc))]
+```
+
+The lexicon list is also updated. Which will be used for selecting, in the test set, the dataframe features used in the classification task.
+```{r}
+lexicon <- colnames(train_x[which(info.terms$attr_importance > 0)])
+lexicon
+```
+So, the test set is constructed using the *DocumentTermMatrix* with *control* parameter as the *lexicon* dictionary. 
+```{r}
+dtm_te <- DocumentTermMatrix(docs_te, control = list(dictionary = lexicon))
+test_x <- as.data.frame(as.matrix(dtm_te)) 
+test_y <- c(rep(query_c1, nte), rep(query_c2, nte))
+test.dc<- cbind(test_x, class=test_y)
+```
+
+## 4.Classification Task
+In this section we describe the classification procedure and performing metrics for the evaluation of text mining assignment. The package *caret* is used for all the classification tasks. The uniform interface and completeness in terms of classification algorithms are the main reason for choice of this package. 
+
+### 4.1 Algorithms
+The algorithm used for the classification task were:
+1. rpart, Decision tree
+2. knn, k nearest neighbour
+3. nnet, Neural networks
+4. svmRad, SVM kernel radial
+5. svmLin2, SVM kernel linear
+
+Additionally, parameter optimization with cross-validation is also possible with *caret* package. We consider cross-validation with 3 folds and set a seed with value 96 for reproducible purpose.
+```{r}
+set.seed(96)
+cv= trainControl(method = "cv", number = 3)
+```
+
+By fixing the choice of the trainControl, we garanty that all algortihms follow the same cross-validation settings.
+
+In the following, we train all the chosen algorithms with *train.dc* data.
+```{r, echo=FALSE, message=FALSE, results="hide"}
+dtree <- train(class~.,method="rpart", data=train.dc, trControl=cv)
+
+# k-nearest neigbors
+knn <- train(class~.,method="knn", data=train.dc, trControl=cv, 
+             preProcess = c("center", "scale"))
+
+# neural networks
+nnets <- train(class~.,method="nnet", data=train.dc, trControl=cv, 
+               preProcess = c("center", "scale"))
+
+# SVM with Radial Kernel
+svmRad <- train(class~.,method="svmRadial", data=train.dc, trControl=cv, 
+                preProcess = c("center", "scale"))
+
+# SVM with Linear Kernel
+svmLin2 <- train(class~.,method="svmLinear2", data=train.dc, trControl=cv, 
+                 preProcess = c("center", "scale"))
+```
+
+### 4.2. Performance Metrics
+
+For the algorithms performance, we considered 4 error metrics:
+
+* errorRate
+* precision
+* recall
+* f1
+
+These metrics are computed for a given confusion matrix, where the last three are given for each class.
+
+```{r}
+errorRate <- function(conf_m)
+{
+  er = (sum(conf_m)-sum(diag(conf_m)))/sum(conf_m)
+  return(er)
+}
+
+f_precision <- function(conf_m)
+{
+  colsums = apply(conf_m, 2, sum) # number of predictions per class
+  prec = diag(conf_m) / colsums
+  return(prec)
+}
+
+f_recall <- function(conf_m)
+{
+  rowsums = apply(conf_m, 1, sum) # number of predictions per class
+  recall = diag(conf_m) / rowsums
+  return(recall)
+}
+
+f1 <- function(conf_m)
+{
+  prec <- f_precision(conf_m)
+  rec <- f_recall(conf_m)
+  f1 <- 2*prec*rec/(prec+rec)
+  return(f1)
+}
+
+compute_metrics <- function(models, df.test, df.class)
+{
+  # models - list of models
+  # df.test - dataset to make the predict
+  # df.class - the labels of the df.test to compute the metrics 
+  
+  predictions <- lapply(models, predict, train.dc)
+  conf_m <- lapply(predictions, table, train.dc$class)
+  A1 <- as.data.frame(list(lapply(conf_m, errorRate)))
+  row.names(A1) <- "error rate"
+  A2 <- as.data.frame(list(lapply(conf_m, f_precision)))
+  row.names(A2) <- paste("precision", row.names(A2), sep = "_")
+  A3 <- as.data.frame(list(lapply(conf_m, f_recall)))
+  row.names(A3) <- paste("recall", row.names(A3), sep = "_")
+  A4 <- as.data.frame(list(lapply(conf_m, f1)))
+  row.names(A4) <- paste("f1", row.names(A4), sep = "_")
+  
+  return(rbind(A1,A2,A3,A4))
+  
+}
+```
+
+## 5.Results and Discussion
+In this section, we present the results and discussion on the classification task.
+We generate and display the classification results for the out-of-sample dataset *test.dc*.
+```{r}
+models <- list(DT=dtree, NN=nnets, KNN=knn, svmRadial=svmRad, SVM_Linear=svmLin2)
+compute_metrics(models, test.dc, test.dc$class)
+```
+Overall the *svmRadial* algorithm offers the best performance for among the tested algorithms, with a error rate of 5.4%. The performance of the remaining algorithms for this metric are above 10%. The *DT* algorithm has the worst performance of the five, reaching an error rate of 18%.
+
+The *HIV* class files are predicted with higher precision in comparison with the *HPV* class. This difference is most seen with the *DT* algorithm, with 94% to 68% precision for *HIV* and *HPV* respectively.
+Regarding recall results, the reverse is observed. The recall on the *HIV* class is much lower in comparison with *HPV* class. Since *f1* metric combines both metrics, the *f1* results is balanced for both classes.  
+
+
+## 6.Conclusions
+We considered a database of biomedical literature. Publications prior to 2016 we considered for training and publications for 2017 where considered for testing and validation of the framework.
+We consider two different query words converting it into two different classes.
+Several classification algorithms were testing. The SVM with Radial Basis provided the lowest error rate at 5.4%, this is, with an accuracy of 94.6%. 
+
+We successfully applied text mining concepts and tools for this task. The R capabilities were maximized for the construction of this report. Starting from the database creation for this assignment, to the writing of the report we use several R packages. The former *RISmed* allows to retrieve hundreds of abstracts for examination. Next, the pre-processing is performed with *tm* package, proven to be a very complete package on the subject. Also, the *caret* package was used for the classification part. It serves from several other R libraries, providing a standardized form for calling out the algorithms. Furthermore, it also allows for a parameter finding and cross validation usage. Finally, the *knitr* package and RStudio IDE was used for the report generation, as it allows for incorporation of R scripts with latex text content.
+
+The good results may be justified by the presence of synonyms in the documents that were not removed in the pre-processing stage. 
+
+## 7.References
+1.KDD 2017/2018 slides
+
+2.Max Kuhn. Contributions from Jed Wing, Steve Weston, Andre Williams, Chris Keefer, Allan
+  Engelhardt, Tony Cooper, Zachary Mayer, Brenton Kenkel, the R Core Team, Michael Benesty,
+  Reynald Lescarbeau, Andrew Ziem, Luca Scrucca, Yuan Tang, Can Candan and Tyler Hunt. (2017).
+  caret: Classification and Regression Training. R package version 6.0-77.
+  https://CRAN.R-project.org/package=caret
+
+3.Ingo Feinerer and Kurt Hornik (2017). tm: Text Mining Package. R package version 0.7-3.
+  https://CRAN.R-project.org/package=tm
+
+4.Piotr Romanski and Lars Kotthoff (2016). FSelector: Selecting Attributes. R package version
+  0.21. https://CRAN.R-project.org/package=FSelector
+
+5.Stephanie Kovalchik (2017). RISmed: Download Content from NCBI Databases. R package version
+  2.1.7. https://CRAN.R-project.org/package=RISmed
+
+6.Ian Fellows (2014). wordcloud: Word Clouds. R package version 2.5.
+  https://CRAN.R-project.org/package=wordcloud
+  
+  
